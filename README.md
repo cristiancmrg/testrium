@@ -1,90 +1,261 @@
-# **Testrium**
+# Testrium
 
-<div style="display: flex; align-items: center;">
-  <img src="https://github.com/letalboy/Spectrum/assets/63066865/cf9c60e7-9eba-474c-8cc1-b246e661fd5c" alt="Testrium Logo" width="200" height="200" style="margin-right: 20px;">
-  <div>
-    <p>**Testrium** is a versatile and advanced testing framework designed to probe and validate complex systems. With powerful tools for data processing, monitoring, and ensuring system integrity, Testrium enhances your development workflow, making it an essential asset for modern testing needs.</p>
-  </div>
-</div>
+Testrium is a circuit-level end-to-end testing framework for Python systems.
 
-## **Key Features**
+It is built for tests where the important question is not only "did this function return the right value?", but:
 
-- **Better Organization of Tests**: Streamline your testing process with improved test management and categorization.
-- **Easy Testing of Async or Parallelized Dependent Tests**: Simplify the testing of asynchronous or parallel workflows with built-in support.
-- **Historic Performance Comparison and Evaluation**: Track and compare test performance over time for better insights.
-- **Custom Behavior Through Callback Systems**: Customize test behaviors using flexible callback mechanisms.
-- **Manipulation of Test Flows**: Gain control over test execution flows to suit various testing scenarios.
-- **Highly Configurable and Expandable**: Tailor Testrium to your specific needs with extensive configuration options.
+```text
+Did this event, command, request, or message travel through the whole system correctly?
+```
 
-## **Installation**
+Testrium helps coordinate multiple Python processes, record probes from each unit, verify that the expected endpoints were activated, and measure latency and consistency across the full circuit.
 
-**Testrium** can be installed using [Poetry](https://python-poetry.org/) or [pip](https://pip.pypa.io/en/stable/).
+## What Testrium Is For
 
-### **Using Poetry**
+Use Testrium when a test needs to prove behavior across multiple runtime units:
+
+- a host and one or more clients
+- two services exchanging messages
+- an API that triggers a worker
+- a producer writing to a queue and a consumer processing it
+- a scheduler activating downstream logic
+- a local microservice flow
+- a module-to-module circuit where the final effect happens away from the source
+
+Testrium is designed for tests where success means:
+
+```text
+processes started
+units synchronized
+events happened
+messages crossed boundaries
+expected probes completed
+the target endpoint activated
+latency and consistency were measured
+the whole circuit passed
+```
+
+## What Testrium Is Not
+
+Testrium is not a replacement for `pytest`, `unittest`, or direct API test tools.
+
+Those tools are excellent for direct tests:
+
+- function input/output
+- class behavior
+- isolated modules
+- single endpoint responses
+- fixtures and local assertions
+
+Testrium sits beside them. It exists for the cases where direct assertions are not enough because the behavior crosses process, service, module, queue, socket, or callback boundaries.
+
+## Why This Library Exists
+
+In many systems, the actual behavior is a circuit:
+
+```text
+source unit -> event/message/request -> intermediate unit -> endpoint activation
+```
+
+Traditional test tools can test each piece, but the full circuit often becomes custom scripts, fixed sleeps, process joins, shared status flags, log scraping, and repeated manual assertions.
+
+Testrium turns that repeated pattern into a framework:
+
+```text
+declare units
+start coordinated processes
+emit probes
+collect events
+verify the circuit
+measure latency
+report pass/fail
+store history
+```
+
+## Core Concepts
+
+### Unit
+
+A unit is one actor in the scenario, such as `host`, `client`, `api`, `worker`, `scheduler`, or `consumer`.
+
+### Probe
+
+A probe is a completion tag emitted by a unit when something important happens.
+
+Examples:
+
+```text
+host-ready
+client-contacted
+command-sent
+command-received
+worker-activated
+response-received
+```
+
+### Event
+
+An event is the stored record of a probe. Events include the unit, completed step, event type, event key, and timestamp.
+
+### Circuit
+
+A circuit is the full path from cause to effect.
+
+Examples:
+
+```text
+client command -> host receives -> host callback runs -> client receives response
+API request -> event emitted -> worker consumes -> database update completes
+service A sends -> service B receives -> service B responds -> service A completes
+```
+
+## What Testrium Measures
+
+Testrium should make these checks first-class:
+
+| Circuit concern | What Testrium verifies |
+| --- | --- |
+| Start point | Which unit emitted the event or command |
+| Route | Which units should receive or process it |
+| Endpoint activation | Which callback, handler, worker, or endpoint ran |
+| Completion tags | Which probes completed in each unit |
+| Consistency | Whether `Send` and `Receive` pairs match by `EventKey` |
+| Latency | Time between send/receive events and total scenario duration |
+| Failure evidence | Missing probes, exception events, orphan sends, orphan receives, duplicate keys |
+
+## Comparison
+
+| Tool or category | Best for | Where Testrium fits |
+| --- | --- | --- |
+| `pytest` | Direct function, class, fixture, and module tests | Use Testrium when the assertion depends on events crossing runtime boundaries |
+| `unittest` | Standard-library direct tests | Use Testrium for coordinated multi-unit scenarios |
+| API test tools | One endpoint request/response | Use Testrium when the endpoint triggers async or downstream behavior |
+| Contract testing | Schema/provider compatibility | Use Testrium to prove the live circuit actually executed |
+| Browser E2E tools | UI flows | Use Testrium for backend/service/module circuits |
+| Load tools | Throughput and stress | Use Testrium for per-circuit correctness and latency |
+| Custom scripts | Project-specific orchestration | Use Testrium to avoid rebuilding process coordination and probe verification |
+
+## Current Features
+
+- Config-driven test groups
+- Unit definitions through TOML files
+- Process-based setup support
+- Event/probe logging with SQLite
+- `Default`, `Exception`, `Send`, and `Receive` event types
+- Callback hooks for extra validation and final result handling
+- Basic result summaries
+- Template generation for starter config files
+
+Some of the intended orchestration and verification behavior is still being implemented. See the design and developer docs for the direction.
+
+## Installation
+
+Using Poetry:
 
 ```bash
 poetry add testrium
 ```
 
-### **Using pip**
+Using pip:
 
 ```bash
 pip install testrium
 ```
 
-### **Example Usage**
+## Quick Start
 
-See the [developer guide](docs/developer-guide.md) for a practical walkthrough of how to structure Testrium scenarios, define units, emit probes, and verify coordinated multi-process behavior.
+Generate a starter config:
 
-### **README Description for Testrium**
+```bash
+testrium gen config-template .
+```
 
----
+Run Testrium from a folder that contains test groups:
 
-# **Testrium: Cutting-Edge Testing with Probes and Validation**
+```bash
+testrium run
+```
 
-**Testrium** is a modern testing framework designed to meet the challenges of contemporary, complex systems. Moving beyond traditional testing tools, **Testrium** offers advanced capabilities for probing and validating intricate behaviors and interactions.
+Run with verbose logs:
 
-## **Why Testrium?**
+```bash
+testrium --verbose run
+```
 
-### 1. **Built for Complexity**
-- **Probing and Validation**: **Testrium** excels in environments where traditional testing frameworks fall short, such as asynchronous, parallel, or interdependent scenarios. It provides tools to insert probes and validate system behavior in real-time.
-- **Sophisticated Setups**: Easily define complex setups, such as socket communication or multi-component integrations, without being constrained by traditional return-based configurations.
+Exclude specific test groups:
 
-### 2. **Dynamic Probes and Checks**
-- **Probes**: Integrate probes within your tests to capture and analyze specific events and state changes, offering detailed insights into system behavior and interactions.
-- **Validation Callbacks**: Utilize a flexible callback system to perform additional validation and cleanup during and after tests. This dynamic mechanism allows tests to adapt based on real-time results.
+```bash
+testrium --less test_redirect run
+```
 
-### 3. **Efficient Parallel Execution**
-- **Concurrent Testing**: Execute multiple tests in parallel to save time and simulate real-world scenarios where different components operate concurrently. **Testrium** manages parallel execution efficiently, ensuring accurate results.
-- **Coordinated Validation**: Validate complex interactions across multiple tests, ensuring system integrity and consistency under varied conditions.
+## Example Shape
 
-### 4. **Configurable and Adaptable**
-- **Config-Driven Design**: Customize test behavior, manage setups, and control execution through configuration files. **Testrium**’s design offers unmatched flexibility, aligning the testing environment precisely with your project’s needs.
+```text
+tests/
+  test_connection/
+    config.toml
+    setup.py
+    test_case.py
+    units/
+      host.toml
+      client.toml
+```
 
-## **Why Build from Scratch?**
+Example unit config:
 
-### 1. **Addressing Existing Limitations**
-- **Traditional Tools**: Existing frameworks like `pytest` often lack the specialized capabilities required for probing and validating complex, event-driven systems.
-- **Innovative Features**: Developing **Testrium** from the ground up allows for the integration of advanced features such as dynamic probes and validation callbacks, free from the constraints of existing architectures.
+```toml
+["client"]
+init = 1
+use_setup = false
+in-except = "Resume"
+unit_dependencies = ["host"]
+events = [
+  "client-ready",
+  "command-sent",
+  "response-received"
+]
+```
 
-### 2. **Optimized for Modern Development**
-- **Focused Use Cases**: **Testrium** is tailored for scenarios involving asynchronous behaviors, parallel processes, and complex system interactions, where traditional tools may fall short.
-- **Future-Ready**: As software development evolves, **Testrium** is designed to adapt, ensuring it remains effective and relevant for new testing challenges.
+Example probe:
 
-## **Goals of Testrium**
+```python
+from testrium.modules.events import Events_Manager
 
-### 1. **Simplify Complex Testing**
-- Provide developers with intuitive tools for testing event-driven and asynchronous systems, reducing the complexity of advanced validation scenarios.
+events = Events_Manager(Unit="client", path=".")
 
-### 2. **Enhance Test Coverage**
-- Enable comprehensive testing of interactions across components, improving the reliability and robustness of complex systems.
+events.Set_Event("client-ready")
+events.Set_Event("command-sent", event_type="Send", event_key="request-001")
+```
 
-### 3. **Promote Flexibility and Control**
-- Offer a highly adaptable testing framework that aligns with diverse project requirements, allowing custom setups, validations, and test flows.
+The receiving unit can emit:
 
-### 4. **Accelerate Development Cycles**
-- Facilitate efficient and effective testing processes that integrate seamlessly into modern development workflows, helping teams deliver high-quality software faster.
+```python
+from testrium.modules.events import Events_Manager
 
----
+events = Events_Manager(Unit="host", path=".")
 
-**Testrium** is your go-to framework for advanced testing with probes and dynamic validation. Elevate your testing strategy with **Testrium** and enhance your development process with robust, adaptable testing capabilities.
+events.Set_Event("command-received", event_type="Receive", event_key="request-001")
+```
+
+Testrium can then verify that the expected probes happened and that the circuit completed.
+
+## Documentation
+
+- [Developer guide](docs/developer-guide.md): how to structure scenarios, units, probes, and circuit-level tests.
+- [Design decisions](docs/design-decisions.md): architecture, module responsibilities, flow diagrams, and implementation direction.
+
+## Project Direction
+
+The near-term implementation priority is:
+
+1. Make the CLI runnable and dependency-complete.
+2. Add strict config and unit validation.
+3. Implement unit orchestration by order, dependency, and setup policy.
+4. Implement event/probe verification.
+5. Add event correlation and history metrics.
+
+Testrium's core promise is simple:
+
+```text
+test the whole circuit, not only one component inside it
+```
