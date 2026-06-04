@@ -1,0 +1,12 @@
+# The target unit receives the source event and activates the endpoint.
+["target"]
+init = 0
+enabled = true
+entrypoint = "test_case:run_target"
+ready_event = "target-ready"
+ready_timeout = 5
+timeout = 10
+use_setup = false
+in-except = "Resume"
+unit_dependencies = []
+events = ["target-ready", "command-received", "endpoint-activated"]

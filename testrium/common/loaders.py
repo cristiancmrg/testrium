@@ -3,7 +3,11 @@ import os
 import importlib.util
 import toml
 from colorama import Fore
-from .validate_configs import normalize_config, normalize_unit_config
+from .validate_configs import (
+    normalize_config,
+    normalize_unit_config,
+    validate_unit_collection,
+)
 
 
 def load_config(config_path):
@@ -28,7 +32,11 @@ def load_test_functions(dir_path):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         for attr in dir(module):
-            if attr in {"Events_Manager", "test_config"}:
+            if not attr.startswith("test_"):
+                continue
+            if attr in {"test_config", "tests_results"}:
+                continue
+            if attr == "test_results":
                 continue
 
             func = getattr(module, attr)
@@ -79,44 +87,46 @@ def load_special_callbakcs(dir_path):
     return special_callbacks
 
 
-def discover_tests(base_dir: str, exclude_tests: list):
+def discover_tests(base_dir: str, exclude_tests: list, strict: bool = True):
     dir_names = os.listdir(base_dir)
     valid_tests = []
 
-                    
     # -> Discover valid test folders with configs inside
     for dir_name in dir_names:
         if dir_name in exclude_tests:
-        # Se estiver na lista de exclusão, imprime uma mensagem informando que foi excluído
-         print(f"Excluded test directory: {dir_name}")
-        # Continua para o próximo diretório sem adicionar à lista de diretórios válidos
-         continue
-         
+            print(f"Excluded test directory: {dir_name}")
+            continue
+
         dir_path = os.path.join(base_dir, dir_name)
+
+        if not os.path.isdir(dir_path):
+            continue
 
         if "test" not in dir_name:
             continue
 
-        if not os.path.isdir(dir_path):
-            print(f"{Fore.RED} File: {dir_name} is not a folder")
-            continue
-
-        setup_path = os.path.join(dir_path, "setup.py")
         config_path = os.path.join(dir_path, "config.toml")
         unit_path = os.path.join(dir_path, "units")
-        
-       
+
         if not os.path.isdir(unit_path):
             continue
-        
-        if not (os.path.exists(setup_path) and os.path.exists(config_path)):
+
+        if not os.path.exists(config_path):
             print(f"{Fore.RED} File: {dir_name} invalid test")
+            if strict:
+                raise ValueError(f"{dir_name} is missing config.toml")
             continue
 
         try:
+            group_config = load_config(config_path)
+            if not group_config["Configs"].get("enabled", True):
+                print(f"{Fore.BLUE}Skipped disabled test group: {dir_name}")
+                continue
             units = resolve_units(unit_path, config_path)
         except ValueError as exc:
             print(f"{Fore.RED} File: {dir_name} invalid config: {exc}")
+            if strict:
+                raise ValueError(f"{dir_name}: {exc}") from exc
             continue
 
         print(f"{Fore.MAGENTA}Found unit directory: {dir_name}")
@@ -158,8 +168,5 @@ def resolve_units(path: str, config_path):
             "missing unit config files for: " + ", ".join(sorted(missing_units))
         )
 
-    return units
-
-
-
-
+    validate_unit_collection(units, configured_units)
+    return sorted(units, key=lambda unit: unit["init"])

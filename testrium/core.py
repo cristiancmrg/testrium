@@ -1,83 +1,105 @@
-import os
-from posixpath import dirname
-import time
-import importlib.util
 import argparse
-import toml
-from colorama import init, Fore, Style
-from .modules.events import Events_Manager
-from .common.loaders import (
+import importlib
+import importlib.util
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import Process
+
+from colorama import Fore, init
+
+from testrium.common.generator.main import resolve_template
+from testrium.common.loaders import (
+    discover_tests,
     load_config,
     load_special_callbakcs,
     load_test_functions,
-    discover_tests,
 )
-from .common.utils import print_banner, suppress_output
-import pandas as pd
-from multiprocessing import Process, Event, Manager
-import sys
-from testrium.common.generator.main import resolve_template
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from testrium.common.utils import print_banner, suppress_output
+from testrium.modules.events import (
+    EVENT_DB_ENV,
+    Events_Manager,
+    Results_Manager,
+    UnitStatus_Manager,
+)
 from testrium.tools.benchmark import run_machine_benchmark, save_benchmark_result
 
-# Initialize colorama
+
 init(autoreset=True)
 
-
-# Extra validation step that user migh want to define
-def dummy_function():
-    """
-    - This will allow to define a extra step in the verification
-    for example, read a file and validate if the test was a success.
-    see if the code did what it was suposed to do. etc..
-    """
-    pass
+EXIT_SUCCESS = 0
+EXIT_FAILURE = 1
+EXIT_NO_TESTS = 2
+EXIT_CONFIG_ERROR = 3
 
 
-def run_setup(setup_path):
-    try:
-        print(setup_path)
-        sys.stdout.flush()  # Ensure the output is flushed immediately
-        module_name = "setup_module"
-        spec = importlib.util.spec_from_file_location(module_name, setup_path)
-        if spec and spec.loader:
-            setup_module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = setup_module
-            spec.loader.exec_module(setup_module)
-            setup_module.main()
-        else:
-            print(f"Could not load module from {setup_path}")
-            sys.stdout.flush()  # Ensure the output is flushed immediately
-    except Exception as e:
-        print(f"An error occurred in run_setup: {e}")
-        sys.stdout.flush()  # Ensure the output is flushed immediately
-
-
-# t1 = Process(target=self.initializer, args=())
-# t2 = Process(target=senders.send_some_data, args=())
-# t3 = Process(target=self.monitor_stop_event, args=())
-#
-# t1.start()
-# time.sleep(5)
-# t2.start()
-# t3.start()
-#
-# t3.join()
-#
-# time.sleep(5)
-#
-# # PID is the process ID of the process you want to send the signal to.
-# # You would typically get this from the 'pid' attribute of a process.
-# os.kill(t1.pid, signal.SIGINT)
-#
-# t1.join()  # Wait for the process to finish
-# t2.join()
-
-
-def handle_exception(test_name: str, start_time, e: str) -> dict:
+def handle_exception(test_name: str, start_time, error: object) -> dict:
     elapsed_time = time.time() - start_time
-    print(f"{Fore.RED}{test_name}: FAILED in {elapsed_time:.2f} seconds\nError: {e}")
+    print(f"{Fore.RED}{test_name}: FAILED in {elapsed_time:.2f} seconds\nError: {error}")
     return {"name": test_name, "passed": False, "total_time": elapsed_time}
+
+
+def run_setup(setup_path: str) -> None:
+    try:
+        module = _load_module_from_path("testrium_setup_module", setup_path)
+        if not hasattr(module, "main"):
+            raise AttributeError(f"{setup_path} does not define main()")
+        module.main()
+    except Exception as exc:
+        print(f"An error occurred in run_setup: {exc}")
+        sys.stdout.flush()
+        raise
+
+
+def _load_module_from_path(module_name: str, path: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if not spec or not spec.loader:
+        raise ImportError(f"Could not load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_entrypoint(test_dir: str, entrypoint: str):
+    # TODO(#24): Add decorator-declared unit entrypoints after config entrypoints stabilize.
+    module_name, function_name = entrypoint.split(":", 1)
+    module_path = os.path.join(test_dir, *module_name.split(".")) + ".py"
+
+    if os.path.isfile(module_path):
+        module = _load_module_from_path(
+            f"testrium_entrypoint_{module_name.replace('.', '_')}",
+            module_path,
+        )
+    else:
+        sys.path.insert(0, test_dir)
+        try:
+            module = importlib.import_module(module_name)
+        finally:
+            if sys.path[0] == test_dir:
+                sys.path.pop(0)
+
+    entrypoint_fn = getattr(module, function_name, None)
+    if not callable(entrypoint_fn):
+        raise AttributeError(f"{entrypoint} does not resolve to a callable")
+    return entrypoint_fn
+
+
+def _entrypoint_worker(test_dir: str, unit_name: str, entrypoint: str, runtime_db: str):
+    os.environ[EVENT_DB_ENV] = runtime_db
+    os.chdir(test_dir)
+    events = Events_Manager(Unit=unit_name, path=test_dir)
+    try:
+        entrypoint_fn = _load_entrypoint(test_dir, entrypoint)
+        entrypoint_fn()
+    except Exception as exc:
+        events.Set_Event(
+            step=f"testrium-unit-exception:{type(exc).__name__}",
+            event_type="Exception",
+            metadata={"message": str(exc)},
+        )
+        raise
 
 
 def _run_single_test(test_name: str, test_func, extra_condition_fn):
@@ -85,14 +107,8 @@ def _run_single_test(test_name: str, test_func, extra_condition_fn):
     start_time = time.time()
 
     try:
-        if test_name == "log_test_time":
-            pass
-        elif test_name == "verify_condition":
-            with suppress_output():
-                test_func(lambda: True)
-        else:
-            with suppress_output():
-                test_func()
+        with suppress_output():
+            test_func()
 
         if extra_condition_fn is not None and not extra_condition_fn(test_name):
             return handle_exception(test_name, start_time, "Extra validation failed")
@@ -101,8 +117,8 @@ def _run_single_test(test_name: str, test_func, extra_condition_fn):
         print(f"{Fore.GREEN}{test_name}: PASSED in {elapsed_time:.2f} seconds")
         return {"name": test_name, "passed": True, "total_time": elapsed_time}
 
-    except Exception as e:
-        return handle_exception(test_name, start_time, e)
+    except Exception as exc:
+        return handle_exception(test_name, start_time, exc)
 
 
 def _ordered_test_groups(test_functions):
@@ -118,41 +134,7 @@ def _ordered_test_groups(test_functions):
         yield tests_by_priority[priority]
 
 
-def run_test(base_dir: str, dir_name: str, test_functions, extra_condition_fn):
-    """
-    This method load the test functions and the special functions,
-    the test function is the test that will run and the special function
-    is a extra verification that can be added to run in the end.
-
-    This functions will return:
-    - all_tests_passed: boolean
-    - test_complete: list
-
-    The test complete is a list of this:
-
-    ```python
-    {"name":test_name, "passed":True, "total_time":elapsed_time}
-    ```
-
-    This dictionary list contain basically the resume of each test completed
-    """
-
-    Events_Manager(Unit="", path=base_dir).drop_events_table()
-
-    setup_path = os.path.join(base_dir, dir_name, "setup.py")
-
-    if os.path.exists(setup_path):
-        t1 = Process(target=run_setup, args=(setup_path,))
-        t1.daemon = True  # Set the process as a daemon
-        t1.start()
-        # run_setup(setup_path)
-        time.sleep(1)
-
-    # TODO >>> Use the units order to setup the units one by one
-    # TODO >>> Create a meachanism to verify the events when they are required
-
-    print(f"{Fore.BLUE}Loading tests for {dir_name}...")
-
+def run_test_functions(test_functions, extra_condition_fn) -> tuple[bool, list[dict]]:
     all_tests_passed = True
     tests_completed = []
 
@@ -187,267 +169,525 @@ def run_test(base_dir: str, dir_name: str, test_functions, extra_condition_fn):
                     tests_completed.append(result)
                     all_tests_passed = all_tests_passed and result["passed"]
 
-    if os.path.exists(setup_path):
-        t1.kill()
-
-    # -> Handle the case where the setup fails and none of the tests has the change to run
-    if len(tests_completed) == 0:
-        for test_name, test_func in test_functions.items():
-            tests_completed.append(
-                handle_exception(
-                    test_name, time.time(), "Setup so all tests was skipped"
-                )
-            )
-
     return all_tests_passed, tests_completed
 
 
-def call_tail_function(
-    tests_results: list, events_completed: list, events_missing: list, tail_fn: object
-):
-    """
-    This method call the function that will receive the score and information of the test in the end.
-    you can use this to make a last verification step that can influentiate if the test passed or not,
-    by return True or False in the end you can fail the test if you want to or send back True, that will
-    not fail the test if if was not failed before.
-    """
+def _runtime_dir(base_dir: str, dir_name: str) -> tuple[str, str]:
+    safe_group = dir_name.replace(os.sep, "_").replace("/", "_")
+    run_id = f"{safe_group}-{int(time.time() * 1000)}"
+    path = os.path.join(base_dir, ".testrium", "runs", run_id)
+    os.makedirs(path, exist_ok=True)
+    return path, os.path.join(path, "Data.db")
 
-    # > Verify if all fail or passed, and calc test total time to run.
-    total_time = 0
-    passed = True
-    for test_result in tests_results:
-        total_time += test_result["total_time"]
-        if not test_result["passed"]:
-            passed = False
-        else:
+
+def _terminate_process(process: Process, grace_seconds: float = 1.0) -> None:
+    if not process.is_alive():
+        return
+    process.terminate()
+    process.join(grace_seconds)
+    if process.is_alive():
+        process.kill()
+        process.join(grace_seconds)
+
+
+def _start_setup(test_dir: str, runtime_db: str) -> Process | None:
+    setup_path = os.path.join(test_dir, "setup.py")
+    if not os.path.exists(setup_path):
+        return None
+
+    process = Process(target=_setup_worker, args=(setup_path, runtime_db, test_dir))
+    process.daemon = True
+    process.start()
+    return process
+
+
+def _setup_worker(setup_path: str, runtime_db: str, test_dir: str) -> None:
+    os.environ[EVENT_DB_ENV] = runtime_db
+    os.chdir(test_dir)
+    run_setup(setup_path)
+
+
+def _enabled_units(units: list[dict]) -> list[dict]:
+    return [unit for unit in units if unit.get("enabled", True)]
+
+
+def _entrypoint_units(units: list[dict]) -> list[dict]:
+    return [unit for unit in _enabled_units(units) if unit.get("entrypoint")]
+
+
+def _dependencies_ready(
+    unit: dict,
+    statuses: UnitStatus_Manager,
+    known_entrypoint_units: set[str],
+) -> tuple[bool, str | None]:
+    for dependency in unit.get("unit_dependencies", []):
+        if dependency not in known_entrypoint_units:
             continue
+        status = statuses.get_status(dependency)
+        if status not in {"ready", "running", "finished", "stopped"}:
+            return False, dependency
+    return True, None
 
+
+def run_unit_processes(
+    base_dir: str,
+    dir_name: str,
+    units: list[dict],
+    configs: dict,
+    runtime_path: str,
+    runtime_db: str,
+) -> dict:
+    start_time = time.time()
+    event_manager = Events_Manager(Unit="*", path=runtime_path)
+    status_manager = UnitStatus_Manager(path=runtime_path)
+    unit_processes: dict[str, Process] = {}
+    unit_results = []
+    failures = []
+    enabled_entrypoint_units = _entrypoint_units(units)
+
+    if not enabled_entrypoint_units:
+        return {
+            "used_entrypoints": False,
+            "passed": True,
+            "duration": 0.0,
+            "unit_results": [],
+            "failures": [],
+        }
+
+    known_entrypoint_units = {unit["name"] for unit in enabled_entrypoint_units}
+    test_dir = os.path.join(base_dir, dir_name)
+
+    for unit in enabled_entrypoint_units:
+        status_manager.set_status(unit["name"], "created")
+
+    for unit in enabled_entrypoint_units:
+        dependencies_ready, missing_dependency = _dependencies_ready(
+            unit, status_manager, known_entrypoint_units
+        )
+        if not dependencies_ready:
+            failures.append(
+                {
+                    "unit": unit["name"],
+                    "reason": f"dependency not ready: {missing_dependency}",
+                }
+            )
+            status_manager.set_status(unit["name"], "failed")
+            break
+
+        status_manager.set_status(unit["name"], "starting")
+        process = Process(
+            target=_entrypoint_worker,
+            args=(test_dir, unit["name"], unit["entrypoint"], runtime_db),
+        )
+        process.start()
+        unit_processes[unit["name"]] = process
+
+        ready_event = unit.get("ready_event")
+        if ready_event:
+            ready = event_manager.wait_for_event(
+                step=ready_event,
+                unit=unit["name"],
+                timeout=unit.get("ready_timeout", 10),
+            )
+            if not ready:
+                failures.append(
+                    {
+                        "unit": unit["name"],
+                        "reason": f"readiness probe timed out: {ready_event}",
+                    }
+                )
+                status_manager.set_status(unit["name"], "failed")
+                break
+
+        status_manager.set_status(unit["name"], "ready")
+        status_manager.set_status(unit["name"], "running")
+
+    if failures:
+        for process in unit_processes.values():
+            _terminate_process(process)
+        return {
+            "used_entrypoints": True,
+            "passed": False,
+            "duration": time.time() - start_time,
+            "unit_results": unit_results,
+            "failures": failures,
+        }
+
+    group_timeout = configs.get("timeout", 30)
+    deadline = time.time() + group_timeout
+    entrypoint_unit_names = {unit["name"] for unit in enabled_entrypoint_units}
+    monitored_units = [
+        unit for unit in units if unit.get("name") in entrypoint_unit_names
+    ]
+
+    while time.time() <= deadline:
+        process_failures = []
+        for unit_name, process in unit_processes.items():
+            if process.exitcode is not None and process.exitcode != 0:
+                process_failures.append(
+                    {"unit": unit_name, "reason": f"process exited {process.exitcode}"}
+                )
+
+        if process_failures:
+            failures.extend(process_failures)
+            break
+
+        required = event_manager.verify_required_events(monitored_units)
+        if not required["missing"]:
+            break
+
+        time.sleep(0.1)
+    else:
+        missing = event_manager.verify_required_events(monitored_units)["missing"]
+        failures.append({"unit": "*", "reason": "required probes timed out", "missing": missing})
+
+    passed = not failures
+    for unit_name, process in unit_processes.items():
+        process.join(0.5)
+        if process.is_alive():
+            _terminate_process(process)
+            status_manager.set_status(unit_name, "stopped" if passed else "failed")
+        elif process.exitcode == 0:
+            status_manager.set_status(unit_name, "finished")
+        else:
+            status_manager.set_status(unit_name, "failed")
+            passed = False
+
+        unit_results.append(
+            {
+                "name": unit_name,
+                "passed": status_manager.get_status(unit_name) in {"finished", "stopped"},
+                "status": status_manager.get_status(unit_name),
+                "exitcode": process.exitcode,
+            }
+        )
+
+    return {
+        "used_entrypoints": True,
+        "passed": passed,
+        "duration": time.time() - start_time,
+        "unit_results": unit_results,
+        "failures": failures,
+    }
+
+
+def call_tail_function(
+    tests_results: list,
+    events_completed: list,
+    events_missing: list,
+    correlations: dict,
+    tail_fn: object,
+):
+    total_time = sum(test_result["total_time"] for test_result in tests_results)
+    passed = all(test_result["passed"] for test_result in tests_results)
     data = {
         "duration": total_time,
         "passed": passed,
         "tests_results": tests_results,
         "events_completed": events_completed,
         "events_missing": events_missing,
+        "correlations": correlations,
     }
-
-    if tail_fn(data):  # If response == False, test will fail
-        pass
-    else:
-        return False
-
-    return True
+    return bool(tail_fn(data))
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Testrium CLI')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Show logs')
-    parser.add_argument('--less', nargs='+', type=str, help='List of specific test names to exclude')
-    subparsers = parser.add_subparsers(dest='command', help='Sub-command help')
-    run_parser = subparsers.add_parser('run', help='Run the tests')
+def _print_probe_report(required: dict) -> None:
+    completed = required["completed"]
+    missing = required["missing"]
+    for event in completed:
+        print(
+            f"   {Fore.GREEN}{event['unit']} completed {event['step']}"
+        )
+    for event in missing:
+        print(
+            f"   {Fore.RED}{event['unit']} missing {event['step']}"
+        )
+
+
+def _print_correlation_report(correlations: dict) -> None:
+    # TODO(#25): Include per-pair latency details when the summary output grows a table mode.
+    print(f"{Fore.BLUE}Event correlations:")
+    print(f"   paired: {len(correlations['paired'])}")
+    print(f"   orphan sends: {len(correlations['orphan_sends'])}")
+    print(f"   orphan receives: {len(correlations['orphan_receives'])}")
+    print(f"   duplicate keys: {len(correlations['duplicate_keys'])}")
+    print(f"   average latency: {correlations['average_latency']:.6f}s")
+
+
+def run_group(base_dir: str, dir_name: str, units: list[dict], verbose: bool) -> dict:
+    group_start = time.time()
+    test_dir = os.path.join(base_dir, dir_name)
+    configs = load_config(os.path.join(test_dir, "config.toml"))["Configs"]
+    runtime_path, runtime_db = _runtime_dir(base_dir, dir_name)
+    previous_runtime_db = os.environ.get(EVENT_DB_ENV)
+    os.environ[EVENT_DB_ENV] = runtime_db
+
+    event_manager = Events_Manager(Unit="*", path=runtime_path)
+    event_manager.drop_events_table()
+    setup_process = None
+    tests_completed = []
+    all_tests_passed = True
+
+    try:
+        setup_process = _start_setup(test_dir, runtime_db)
+        if setup_process:
+            time.sleep(0.2)
+            if setup_process.exitcode not in {None, 0}:
+                raise RuntimeError(f"setup exited {setup_process.exitcode}")
+
+        special_functions = load_special_callbakcs(test_dir)
+        test_functions = load_test_functions(test_dir)
+
+        process_result = run_unit_processes(
+            base_dir=base_dir,
+            dir_name=dir_name,
+            units=units,
+            configs=configs,
+            runtime_path=runtime_path,
+            runtime_db=runtime_db,
+        )
+        if process_result["used_entrypoints"]:
+            tests_completed.append(
+                {
+                    "name": "unit_processes",
+                    "passed": process_result["passed"],
+                    "total_time": process_result["duration"],
+                    "details": process_result["unit_results"],
+                }
+            )
+            all_tests_passed = all_tests_passed and process_result["passed"]
+
+        if test_functions:
+            if not verbose:
+                with suppress_output():
+                    tests_ok, direct_tests = run_test_functions(
+                        test_functions,
+                        special_functions["validate_test"],
+                    )
+            else:
+                tests_ok, direct_tests = run_test_functions(
+                    test_functions,
+                    special_functions["validate_test"],
+                )
+            tests_completed.extend(direct_tests)
+            all_tests_passed = all_tests_passed and tests_ok
+
+        if not tests_completed:
+            tests_completed.append(
+                {
+                    "name": "scenario",
+                    "passed": False,
+                    "total_time": 0.0,
+                    "reason": "no entrypoints or test functions found",
+                }
+            )
+            all_tests_passed = False
+
+        required = event_manager.verify_required_events(_enabled_units(units))
+        correlations = event_manager.correlate_send_receive()
+        all_tests_passed = all_tests_passed and not required["missing"]
+        all_tests_passed = all_tests_passed and not correlations["orphan_sends"]
+        all_tests_passed = all_tests_passed and not correlations["orphan_receives"]
+        all_tests_passed = all_tests_passed and not correlations["duplicate_keys"]
+
+        print(f"{Fore.BLUE}Probe report for {dir_name}:")
+        _print_probe_report(required)
+        _print_correlation_report(correlations)
+
+        tail_fn = special_functions["tests_results"]
+        if tail_fn is not None:
+            tail_passed = call_tail_function(
+                tests_completed,
+                required["completed"],
+                required["missing"],
+                correlations,
+                tail_fn,
+            )
+            all_tests_passed = all_tests_passed and tail_passed
+
+        duration = time.time() - group_start
+        summary = {
+            "tests": tests_completed,
+            "required": required,
+            "correlations": correlations,
+            "runtime_db": runtime_db,
+        }
+        if configs.get("save-metrics", True):
+            Results_Manager(path=runtime_path).store_result(
+                test_group=dir_name,
+                passed=all_tests_passed,
+                duration=duration,
+                average_latency=correlations["average_latency"],
+                summary=summary,
+            )
+
+        return {
+            "name": dir_name,
+            "passed": all_tests_passed,
+            "duration": duration,
+            "tests": tests_completed,
+            "required": required,
+            "correlations": correlations,
+            "runtime_db": runtime_db,
+        }
+    finally:
+        if setup_process is not None:
+            _terminate_process(setup_process)
+        if previous_runtime_db is None:
+            os.environ.pop(EVENT_DB_ENV, None)
+        else:
+            os.environ[EVENT_DB_ENV] = previous_runtime_db
+
+
+def print_summary(results: list[dict]) -> None:
+    for result in results:
+        print("-=" * 15)
+        print(f"{Fore.CYAN}{result['name']}:")
+        print(f"Elapsed time: {result['duration']:.4f}s")
+        for test in result["tests"]:
+            color = Fore.GREEN if test["passed"] else Fore.RED
+            status = "PASS" if test["passed"] else "FAIL"
+            print(f"  - {color}{status} {test['name']}")
+        print(f"Runtime DB: {result['runtime_db']}")
+        if result["passed"]:
+            print(f"  {Fore.GREEN}All checks passed")
+        else:
+            print(f"  {Fore.RED}Scenario failed")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Testrium CLI")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show logs")
+    parser.add_argument(
+        "--less",
+        nargs="+",
+        type=str,
+        help="List of specific test group names to exclude",
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Sub-command help")
+    subparsers.add_parser("run", help="Run the tests")
 
     benchmark_parser = subparsers.add_parser(
-        'benchmark',
-        help='Collect machine benchmark scores for result normalization',
+        "benchmark",
+        help="Collect machine benchmark scores for result normalization",
     )
     benchmark_parser.add_argument(
-        '--database',
+        "--database",
         default=None,
-        help='Optional SQLite database path to store the benchmark result',
+        help="Optional SQLite database path to store the benchmark result",
     )
     benchmark_parser.add_argument(
-        '--iterations',
+        "--iterations",
         type=int,
         default=3,
-        help='Number of iterations for each benchmark sample',
+        help="Number of iterations for each benchmark sample",
     )
 
     gen_configs_parser = subparsers.add_parser(
-        'gen-configs',
-        help='Generate config.toml and units templates in a target directory',
+        "gen-configs",
+        help="Generate config.toml and unit templates in a target directory",
     )
     gen_configs_parser.add_argument(
-        'gen_path',
-        nargs='?',
-        default='.',
+        "gen_path",
+        nargs="?",
+        default=".",
         help='Path for generation. Use "." for the current directory',
     )
 
-    gen_parser = subparsers.add_parser('gen', help='Generate already made templates')
-    gen_parser.add_argument('type', choices=["config-template"], help='Type of the template to generate')
+    gen_parser = subparsers.add_parser("gen", help="Generate templates")
     gen_parser.add_argument(
-        'gen_path',
-        nargs='?',
-        default='.',
-        help='Optional path for the generation',
+        "type", choices=["config-template"], help="Type of template to generate"
     )
-    args = parser.parse_args()
+    gen_parser.add_argument(
+        "gen_path",
+        nargs="?",
+        default=".",
+        help="Optional path for generation",
+    )
+    return parser
+
+
+def run_cli(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.command == "gen":
         resolve_template(args.type, args.gen_path)
-        return
+        return EXIT_SUCCESS
 
     if args.command == "gen-configs":
         resolve_template("config-template", args.gen_path)
-        return
+        return EXIT_SUCCESS
 
     if args.command == "benchmark":
         result = run_machine_benchmark(iterations=args.iterations)
         if args.database:
             save_benchmark_result(args.database, result)
         print(result.to_dict())
-        return
-    
+        return EXIT_SUCCESS
+
+    if args.command not in {None, "run"}:
+        parser.print_help()
+        return EXIT_CONFIG_ERROR
+
     base_dir = os.getcwd()
+    exclude_tests = args.less or []
 
-    exclude_tests = []
-        # Handle --less option
-    if args.less:
-        exclude_tests.extend(args.less)
-        print("Base Directory:", base_dir)
-        print("Excluded Tests:", args.less)
-
-    # Verbose mode
     if args.verbose:
         print("Verbose mode enabled")
-        
+    if exclude_tests:
+        print("Base Directory:", base_dir)
+        print("Excluded Tests:", exclude_tests)
+
     print(f"{Fore.GREEN}Current working directory: {base_dir}")
+    try:
+        valid_tests = discover_tests(base_dir, exclude_tests)
+    except ValueError as exc:
+        print(f"{Fore.RED}Configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
 
-    valid_tests = discover_tests(base_dir, exclude_tests)
+    if not valid_tests:
+        print(f"{Fore.RED}No valid test groups found")
+        return EXIT_NO_TESTS
 
-    # -> Early retun if not find any test:
-    tests_finded = len(valid_tests)
-    if tests_finded > 0:
-        print(f"{Fore.GREEN} Find: {tests_finded:.0f} valid test groups!")
-        for test_group in valid_tests:
-            print(f"{Fore.GREEN} - {test_group[0]}")
-            for unit in test_group[1]:
-                print(f"   {Fore.GREEN} - Unit {unit['name']}")
-    else:
-        print(f"{Fore.RED} No valid test groups finded!")
-        return
-
-    # TODO >>> Find a way to log the milestones completed for each test and with this understand what they relate to
-
-    tests_passed = {}
-
-    # -> Run the valid tests:
+    print(f"{Fore.GREEN}Found {len(valid_tests)} valid test groups")
     for dir_name, units in valid_tests:
-        # TODO >>> Enhance the config loading to have a structure verification
-        # TODO >>> Add option to disble a test if want to using somehting like enable: False for example
-
-        # > Load test configs
-        configs = load_config(os.path.join(dir_name, "config.toml"))
-
-        # > Load Units
-        confs = configs["Configs"]
-
-        # > Load Units Predefinitions
-        total_units = 0
-        units_index = {}
-
-        # TODO >>> Validate index of units, avoid duplicates - beqm
+        print(f"{Fore.GREEN} - {dir_name}")
         for unit in units:
-            units_index[unit["init"]] = {"name": f"{unit['name']}", "events": f"{unit['events']}"}
-            total_units += 1
+            if unit.get("enabled", True):
+                print(f"   {Fore.GREEN} - Unit {unit['name']}")
+            else:
+                print(f"   {Fore.BLUE} - Unit {unit['name']} disabled")
 
-        print(f"Units loaded: {units_index}")
-
-        dir_path = os.path.join(base_dir, dir_name)
-
-        test_functions = load_test_functions(dir_path)
-        special_functions = load_special_callbakcs(dir_path)
-
-        # > Run extra validation
-        extra_condition_fn = special_functions["validate_test"]
-        if not args.verbose:
-            with suppress_output():
-                all_tests_passed, tests_passed[f"{dir_name}"] = run_test(
-                    base_dir, dir_name, test_functions, extra_condition_fn
-                )
-        else:
-            all_tests_passed, tests_passed[f"{dir_name}"] = run_test(
-                base_dir, dir_name, test_functions, extra_condition_fn
-            )        
-
-        events_completed = []
-        events_missing = []
-
-        # > Verify Events Completed By The Unit
-        for i in range(total_units):
-            unit = units_index[i]
-            unit_name = unit["name"]
-            if unit_name == "":
-                continue
-
-            unit_events = (
-                pd.DataFrame.from_dict(
-                    Events_Manager(Unit=unit_name, path=base_dir).List_Events()
-                )
-                .loc[:, "StepCompleted"]
-                .to_list()
+    results = []
+    for dir_name, units in valid_tests:
+        try:
+            result = run_group(base_dir, dir_name, units, args.verbose)
+            results.append(result)
+            print_banner(" PASS " if result["passed"] else " FAILURE ", Fore.GREEN if result["passed"] else Fore.RED)
+        except ValueError as exc:
+            print(f"{Fore.RED}{dir_name}: configuration error: {exc}")
+            return EXIT_CONFIG_ERROR
+        except Exception as exc:
+            print(f"{Fore.RED}{dir_name}: failed: {exc}")
+            results.append(
+                {
+                    "name": dir_name,
+                    "passed": False,
+                    "duration": 0.0,
+                    "tests": [],
+                    "required": {"completed": [], "missing": []},
+                    "correlations": {},
+                    "runtime_db": "",
+                }
             )
 
-            print(f"{Fore.BLUE} Unit {unit['name']}")
-            for event in unit["events"]:
-                if event not in unit_events:
-                    print(f"   - {Fore.RED}{event} was not completed!")
-                    events_missing.append(event)
-                    all_tests_passed = False
-                else:
-                    print(f"   - {Fore.GREEN}{event} was sucessfully completed!")
-                    events_completed.append(event)
-                    continue
+    print_summary(results)
+    return EXIT_SUCCESS if all(result["passed"] for result in results) else EXIT_FAILURE
 
-        # > Call the tail callback
-        tail_fn = special_functions["tests_results"]
-        if tail_fn != None:
-            if not call_tail_function(
-                tests_passed[f"{dir_name}"], events_completed, events_missing, tail_fn
-            ):
-                print(f"❗{Fore.RED}Tail Function Fail")
-                all_tests_passed = False
-        else:
-            pass
 
-        if all_tests_passed:
-            print_banner(" PASS ", Fore.GREEN)
-        else:
-            print_banner(" FAILURE ", Fore.RED)
-
-    # -> SHOW RESUME ON SCREEN:
-    for name, tests in tests_passed.items():
-        print("-=" * 15)
-        print(f"{Fore.CYAN}{name}:")
-        all_p = True
-        total_time = 0
-
-        passed = 0
-        for test in tests:
-            all_s_p = True
-            total_time += test["total_time"]
-            if test["passed"]:
-                passed += 1
-                continue
-            else:
-                all_s_p = False
-
-        print(f"⚡ Elapsed time: {total_time}")
-        if not all_s_p:
-            print(f"{Fore.RED}{passed}/{len(tests)} Passed!")
-        else:
-            print(f"{Fore.GREEN}{passed}/{len(tests)} Passed!")
-
-        for test in tests:
-            if test["passed"]:
-                print(f"  - ✅ {Fore.GREEN}{test['name']}")
-            else:
-                print(f"  - 🟥 {Fore.RED}{test['name']}")
-                all_p = False
-
-        if all_p:
-            print(f"  🚀 {Fore.GREEN}All Tests Passed!")
-        else:
-            print(f"  💥 {Fore.RED}FAIL!")
+def main():
+    sys.exit(run_cli())
 
 
 if __name__ == "__main__":
