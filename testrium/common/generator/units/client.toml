@@ -1,5 +1,7 @@
 # This will be the events checked for the unit
 ["client"]
 init = 1
+use_setup = false
+in-except = "Resume"
+unit_dependencies = ["_host"]
 events = ["event1", "event2", "event3"]
-in-except = "Resume" # Resume or Reload or Resume-ALL

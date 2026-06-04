@@ -17,6 +17,15 @@ def log_test_time(func):
     return wrapper
 
 
+def test_config(priority: int = 0, parallelize: bool = False):
+    def decorator(func):
+        func.testrium_priority = priority
+        func.testrium_parallelize = parallelize
+        return func
+
+    return decorator
+
+
 def verify_condition(condition, message="Verification failed"):
     if not condition:
         raise AssertionError(message)
