@@ -34,7 +34,7 @@ pip install testrium
 
 ### **Example Usage**
 
-[NEEDS TO BE DONE]
+See the [developer guide](docs/developer-guide.md) for a practical walkthrough of how to structure Testrium scenarios, define units, emit probes, and verify coordinated multi-process behavior.
 
 ### **README Description for Testrium**
 
