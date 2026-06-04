@@ -1,2 +1,2 @@
 ["Configs"]
-units = ["Primary"]
+units = ["_host", "client"]

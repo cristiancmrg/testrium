@@ -1,5 +1,5 @@
 # This will be the events checked for the host 
-["host"]
+["_host"]
 init = 0
 use_setup = false
 in-except = "Resume" # Resume or Reload or Resume-ALL
