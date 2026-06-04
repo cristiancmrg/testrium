@@ -1,0 +1,12 @@
+# The source unit emits the event that should cross the circuit.
+["source"]
+init = 1
+enabled = true
+entrypoint = "test_case:run_source"
+ready_event = "source-ready"
+ready_timeout = 5
+timeout = 10
+use_setup = false
+in-except = "Resume"
+unit_dependencies = ["target"]
+events = ["source-ready", "command-sent", "response-received"]

@@ -12,6 +12,7 @@ license = "MIT"
 python = "^3.10"
 toml = "^0.10.2"
 pandas = "^2.2.2"
+colorama = "^0.4.6"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
