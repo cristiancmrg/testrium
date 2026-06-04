@@ -1,10 +1,39 @@
 import textwrap
 
-from testrium.core import EXIT_CONFIG_ERROR, EXIT_SUCCESS, run_cli
+from testrium.core import EXIT_CONFIG_ERROR, EXIT_FAILURE, EXIT_NO_TESTS, EXIT_SUCCESS, run_cli
 
 
 def write_file(path, content):
     path.write_text(textwrap.dedent(content), encoding="utf-8")
+
+
+def write_unit(path, name, init, events, entrypoint="test_case:run_unit", **kwargs):
+    enabled = str(kwargs.get("enabled", True)).lower()
+    ready_event = kwargs.get("ready_event")
+    ready_timeout = kwargs.get("ready_timeout", 1)
+    dependencies = kwargs.get("dependencies", [])
+    timeout = kwargs.get("timeout", 2)
+
+    ready_line = f'ready_event = "{ready_event}"' if ready_event else "ready_event = \"\""
+    dependency_list = ", ".join(f'"{dependency}"' for dependency in dependencies)
+    event_list = ", ".join(f'"{event}"' for event in events)
+
+    write_file(
+        path,
+        f"""
+        ["{name}"]
+        init = {init}
+        enabled = {enabled}
+        entrypoint = "{entrypoint}"
+        {ready_line}
+        ready_timeout = {ready_timeout}
+        timeout = {timeout}
+        use_setup = false
+        in-except = "Resume"
+        unit_dependencies = [{dependency_list}]
+        events = [{event_list}]
+        """,
+    )
 
 
 def test_run_cli_executes_two_unit_circuit(tmp_path, monkeypatch):
@@ -75,6 +104,17 @@ def test_run_cli_executes_two_unit_circuit(tmp_path, monkeypatch):
     assert run_cli(["run"]) == EXIT_SUCCESS
 
 
+def test_run_cli_runs_generated_template_circuit(tmp_path, monkeypatch):
+    group = tmp_path / "test_generated"
+    group.mkdir()
+
+    assert run_cli(["gen", "config-template", str(group)]) == EXIT_SUCCESS
+
+    monkeypatch.chdir(tmp_path)
+
+    assert run_cli(["run"]) == EXIT_SUCCESS
+
+
 def test_run_cli_returns_config_error_for_invalid_group(tmp_path, monkeypatch):
     group = tmp_path / "test_bad_config"
     (group / "units").mkdir(parents=True)
@@ -90,3 +130,167 @@ def test_run_cli_returns_config_error_for_invalid_group(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     assert run_cli(["run"]) == EXIT_CONFIG_ERROR
+
+
+def test_run_cli_returns_no_tests_for_empty_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    assert run_cli(["run"]) == EXIT_NO_TESTS
+
+
+def test_run_cli_fails_when_readiness_probe_is_missing(tmp_path, monkeypatch):
+    group = tmp_path / "test_missing_ready"
+    units = group / "units"
+    units.mkdir(parents=True)
+
+    write_file(
+        group / "config.toml",
+        """
+        ["Configs"]
+        units = ["source"]
+        enabled = true
+        timeout = 1
+        """,
+    )
+    write_unit(
+        units / "source.toml",
+        "source",
+        init=0,
+        ready_event="source-ready",
+        ready_timeout=0.2,
+        events=["source-ready"],
+    )
+    write_file(
+        group / "test_case.py",
+        """
+        def run_unit():
+            return None
+        """,
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    assert run_cli(["run"]) == EXIT_FAILURE
+
+
+def test_run_cli_fails_when_completion_probe_is_missing(tmp_path, monkeypatch):
+    group = tmp_path / "test_missing_completion"
+    units = group / "units"
+    units.mkdir(parents=True)
+
+    write_file(
+        group / "config.toml",
+        """
+        ["Configs"]
+        units = ["source"]
+        enabled = true
+        timeout = 0.4
+        """,
+    )
+    write_unit(
+        units / "source.toml",
+        "source",
+        init=0,
+        ready_event="source-ready",
+        ready_timeout=0.5,
+        events=["source-ready", "finished"],
+    )
+    write_file(
+        group / "test_case.py",
+        """
+        from testrium.modules.events import Events_Manager
+
+        def run_unit():
+            Events_Manager(Unit="source", path=".").Set_Event("source-ready")
+        """,
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    assert run_cli(["run"]) == EXIT_FAILURE
+
+
+def test_run_cli_fails_when_unit_process_raises(tmp_path, monkeypatch):
+    group = tmp_path / "test_failed_process"
+    units = group / "units"
+    units.mkdir(parents=True)
+
+    write_file(
+        group / "config.toml",
+        """
+        ["Configs"]
+        units = ["source"]
+        enabled = true
+        timeout = 1
+        """,
+    )
+    write_unit(
+        units / "source.toml",
+        "source",
+        init=0,
+        ready_event="source-ready",
+        events=["source-ready", "finished"],
+    )
+    write_file(
+        group / "test_case.py",
+        """
+        from testrium.modules.events import Events_Manager
+
+        def run_unit():
+            Events_Manager(Unit="source", path=".").Set_Event("source-ready")
+            raise RuntimeError("expected failure")
+        """,
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    assert run_cli(["run"]) == EXIT_FAILURE
+
+
+def test_run_cli_ignores_disabled_units(tmp_path, monkeypatch):
+    group = tmp_path / "test_disabled_unit"
+    units = group / "units"
+    units.mkdir(parents=True)
+
+    write_file(
+        group / "config.toml",
+        """
+        ["Configs"]
+        units = ["target", "source"]
+        enabled = true
+        timeout = 1
+        """,
+    )
+    write_unit(
+        units / "target.toml",
+        "target",
+        init=0,
+        ready_event="target-ready",
+        events=["target-ready"],
+        entrypoint="test_case:run_target",
+    )
+    write_unit(
+        units / "source.toml",
+        "source",
+        init=1,
+        enabled=False,
+        ready_event="source-ready",
+        events=["source-ready"],
+        entrypoint="test_case:run_source",
+    )
+    write_file(
+        group / "test_case.py",
+        """
+        from testrium.modules.events import Events_Manager
+
+        def run_target():
+            Events_Manager(Unit="target", path=".").Set_Event("target-ready")
+
+        def run_source():
+            raise RuntimeError("disabled unit should not run")
+        """,
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    assert run_cli(["run"]) == EXIT_SUCCESS
