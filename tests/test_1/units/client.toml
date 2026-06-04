@@ -1,0 +1,5 @@
+# This will be the events checked for the unit
+["client"]
+init = 1
+events = ["event1", "event2", "event3"]
+in-except = "Resume" # Resume or Reload or Resume-ALL

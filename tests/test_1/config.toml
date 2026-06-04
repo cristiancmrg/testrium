@@ -1,6 +1,2 @@
 ["Configs"]
-units = ["Primary"]
-
-["Primary"]
-init = 0
-events=["Test example completed", "evento 1"]
+units = ["_host", "client"]
