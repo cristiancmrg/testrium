@@ -25,6 +25,7 @@ def resolve_template(type: str, path: str | None = "."):
 
         template_dir = os.path.dirname(__file__)
         _copy_template_file(os.path.join(template_dir, "config.toml"), target_path)
+        _copy_template_file(os.path.join(template_dir, "test_case.py"), target_path)
 
         units_source = os.path.join(template_dir, "units")
         units_target = os.path.join(target_path, "units")

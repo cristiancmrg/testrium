@@ -139,14 +139,20 @@ Testrium should make these checks first-class:
 
 - Config-driven test groups
 - Unit definitions through TOML files
+- Config-first unit entrypoints using `module:function`
+- Coordinated Python unit processes
+- Unit lifecycle states and readiness probes
+- Isolated SQLite runtime state per test group run
 - Process-based setup support
 - Event/probe logging with SQLite
 - `Default`, `Exception`, `Send`, and `Receive` event types
+- Required probe verification
+- Send/receive correlation with latency metrics
 - Callback hooks for extra validation and final result handling
 - Basic result summaries
 - Template generation for starter config files
 
-Some of the intended orchestration and verification behavior is still being implemented. See the design and developer docs for the direction.
+The remaining near-term work is focused on richer fixtures, public history APIs, and broader reporting polish.
 
 ## Installation
 
@@ -197,20 +203,23 @@ tests/
     setup.py
     test_case.py
     units/
-      host.toml
-      client.toml
+      target.toml
+      source.toml
 ```
 
 Example unit config:
 
 ```toml
-["client"]
+["source"]
 init = 1
+enabled = true
+entrypoint = "test_case:run_source"
+ready_event = "source-ready"
 use_setup = false
 in-except = "Resume"
-unit_dependencies = ["host"]
+unit_dependencies = ["target"]
 events = [
-  "client-ready",
+  "source-ready",
   "command-sent",
   "response-received"
 ]
@@ -221,9 +230,9 @@ Example probe:
 ```python
 from testrium.modules.events import Events_Manager
 
-events = Events_Manager(Unit="client", path=".")
+events = Events_Manager(Unit="source", path=".")
 
-events.Set_Event("client-ready")
+events.Set_Event("source-ready")
 events.Set_Event("command-sent", event_type="Send", event_key="request-001")
 ```
 
@@ -232,7 +241,7 @@ The receiving unit can emit:
 ```python
 from testrium.modules.events import Events_Manager
 
-events = Events_Manager(Unit="host", path=".")
+events = Events_Manager(Unit="target", path=".")
 
 events.Set_Event("command-received", event_type="Receive", event_key="request-001")
 ```
@@ -243,6 +252,7 @@ Testrium can then verify that the expected probes happened and that the circuit 
 
 - [Developer guide](docs/developer-guide.md): how to structure scenarios, units, probes, and circuit-level tests.
 - [Design decisions](docs/design-decisions.md): architecture, module responsibilities, flow diagrams, and implementation direction.
+- [Implementation roadmap](docs/implementation-roadmap.md): issue-aligned gaps, acceptance gates, and MVP follow-up work.
 
 ## Project Direction
 

@@ -1,19 +1,24 @@
-name: Publish Python Package
+name: Test Suite
 
 on:
-  release:
-    types:
-      - published
+  pull_request:
+    branches:
+      - develop
+      - master
+  push:
+    branches:
+      - develop
+      - master
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  publish:
-    name: Build and publish to PyPI
+  tests:
+    name: Python tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -36,22 +41,13 @@ jobs:
       - name: Check package metadata
         run: poetry check --lock
 
+      - name: Compile Python files
+        run: poetry run python -m compileall testrium tests
+
       - name: Run test suite
         run: poetry run pytest -q
 
-      - name: Build package
-        run: poetry build
-
-      - name: Check PyPI token
-        env:
-          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Run CLI smoke scenario
         run: |
-          if [ -z "$POETRY_PYPI_TOKEN_PYPI" ]; then
-            echo "PYPI_API_TOKEN secret is required to publish to PyPI."
-            exit 1
-          fi
-
-      - name: Publish package
-        env:
-          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_API_TOKEN }}
-        run: poetry publish --no-interaction --username __token__ --password "$POETRY_PYPI_TOKEN_PYPI"
+          cd tests
+          ../.venv/bin/python -m testrium.core run

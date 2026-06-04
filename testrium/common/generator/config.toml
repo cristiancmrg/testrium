@@ -1,8 +1,10 @@
-# This is the overal configs of the test group
+# This is the overall config for a circuit-level test group
 ["Configs"]
-units = ["_host", "client"]
+units = ["target", "source"]
 debug-modes = ["DEBUG", "INFO", "WARNING", "EXCEPT"]
 test-modes = ["DEBUG"]                               # Can be "<MODE>", ["<MODE1>", <"MODE2">, ...], "All"
+enabled = true
+timeout = 10
 use-ai = false
 diagnostics = true
 detect-bad-behavior = true
