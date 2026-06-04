@@ -1,113 +1,176 @@
-import time
-import numpy as np
+import hashlib
 import os
+import platform
 import sqlite3
-from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import statistics
+import tempfile
+import time
+from dataclasses import dataclass, asdict
+from typing import Callable
 
-def run_benchmark_multiple_times(benchmark_func, iterations=10, warmup=True):
-    if warmup:
-        benchmark_func()
-    
-    times = []
-    for _ in tqdm(range(iterations), desc=benchmark_func.__name__, leave=False):
-        start_time = time.time()
-        benchmark_func()
-        end_time = time.time()
-        times.append(end_time - start_time)
-    
-    return times  # Return all times for visualization
 
-def cpu_benchmark_single_core():
-    result = 0
-    for i in range(1, 1000000):
-        result += (i ** 0.5) ** 2
+@dataclass
+class BenchmarkResult:
+    machine_id: str
+    cpu_score: float
+    memory_score: float
+    disk_score: float
+    io_score: float
+    score: float
 
-def cpu_benchmark_multicore(workers=4):
-    def worker_task(start, end):
-        result = 0
-        for i in range(start, end):
-            result += (i ** 0.5) ** 2
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def get_machine_id() -> str:
+    identity = "|".join(
+        [
+            platform.node(),
+            platform.system(),
+            platform.machine(),
+            platform.processor(),
+        ]
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def _time_operation(operation: Callable[[], None], iterations: int) -> float:
+    if iterations < 1:
+        raise ValueError("iterations must be greater than zero")
+    samples = []
+    for _ in range(iterations):
+        start_time = time.perf_counter()
+        operation()
+        samples.append(time.perf_counter() - start_time)
+    return statistics.median(samples)
+
+
+def _score_from_seconds(seconds: float) -> float:
+    if seconds <= 0:
+        return 0.0
+    return 1.0 / seconds
+
+
+def cpu_benchmark(iterations: int = 3) -> float:
+    def operation():
+        result = 0.0
+        for value in range(1, 100000):
+            result += (value ** 0.5) ** 2
         return result
 
-    chunk_size = 1000000 // workers
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(worker_task, i * chunk_size, (i + 1) * chunk_size) for i in range(workers)]
-        results = [future.result() for future in as_completed(futures)]
-    return sum(results)
+    return _score_from_seconds(_time_operation(operation, iterations))
 
-def memory_benchmark():
-    array_size = 10000000
-    array = np.arange(array_size, dtype=np.float64)
-    array *= 2
 
-def disk_benchmark():
-    with open('disk_benchmark.tmp', 'wb') as f:
-        f.write(os.urandom(500000000))  # Write 500MB
-    with open('disk_benchmark.tmp', 'rb') as f:
-        f.read()
-    os.remove('disk_benchmark.tmp')
+def memory_benchmark(iterations: int = 3) -> float:
+    def operation():
+        values = list(range(100000))
+        sum(values)
 
-def io_benchmark():
-    with open('io_benchmark.tmp', 'w') as f:
-        for _ in range(100000):
-            f.write('This is a test.\n')
-    os.remove('io_benchmark.tmp')
+    return _score_from_seconds(_time_operation(operation, iterations))
 
-def peak_disk_write_benchmark(file_size_mb=500):
-    data = os.urandom(file_size_mb * 1024 * 1024)  # Generate large data block
-    file_path = 'peak_disk_write.tmp'
-    
-    start_time = time.time()
-    with open(file_path, 'wb') as f:
-        f.write(data)
-        f.flush()  # Ensure all data is written
-        os.fsync(f.fileno())  # Flush OS buffer to disk
-    end_time = time.time()
-    
-    os.remove(file_path)  # Clean up
-    
-    elapsed_time = end_time - start_time
-    throughput = file_size_mb / elapsed_time  # MB/s
-    return throughput
 
-def run_peak_disk_write_benchmark(iterations=5, file_size_mb=500):
-    throughputs = []
-    for _ in tqdm(range(iterations), desc="Peak Disk Write Benchmark", leave=False):
-        throughput = peak_disk_write_benchmark(file_size_mb)
-        throughputs.append(throughput)
-    return throughputs
+def disk_benchmark(iterations: int = 3, size_kb: int = 256) -> float:
+    data = os.urandom(size_kb * 1024)
 
-def save_benchmark_results(machine_id, benchmark_name, times):
-    conn = sqlite3.connect('test_results.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS benchmark_samples (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            machine_id TEXT,
-            benchmark_name TEXT,
-            time REAL
+    def operation():
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file.write(data)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_path = temp_file.name
+        with open(temp_path, "rb") as temp_file:
+            temp_file.read()
+        os.remove(temp_path)
+
+    return _score_from_seconds(_time_operation(operation, iterations))
+
+
+def io_benchmark(iterations: int = 3, lines: int = 5000) -> float:
+    def operation():
+        with tempfile.NamedTemporaryFile("w", delete=False) as temp_file:
+            for _ in range(lines):
+                temp_file.write("This is a test.\n")
+            temp_path = temp_file.name
+        os.remove(temp_path)
+
+    return _score_from_seconds(_time_operation(operation, iterations))
+
+
+def calculate_machine_score(
+    cpu_score: float,
+    memory_score: float,
+    disk_score: float,
+    io_score: float,
+) -> float:
+    scores = [cpu_score, memory_score, disk_score, io_score]
+    return statistics.geometric_mean(score for score in scores if score > 0)
+
+
+def run_machine_benchmark(machine_id: str | None = None, iterations: int = 3) -> BenchmarkResult:
+    cpu_score = cpu_benchmark(iterations)
+    memory_score = memory_benchmark(iterations)
+    disk_score = disk_benchmark(iterations)
+    io_score = io_benchmark(iterations)
+    score = calculate_machine_score(cpu_score, memory_score, disk_score, io_score)
+    return BenchmarkResult(
+        machine_id=machine_id or get_machine_id(),
+        cpu_score=cpu_score,
+        memory_score=memory_score,
+        disk_score=disk_score,
+        io_score=io_score,
+        score=score,
+    )
+
+
+def normalize_duration(duration: float, machine_score: float, baseline_score: float) -> float:
+    if duration < 0:
+        raise ValueError("duration must be greater than or equal to zero")
+    if machine_score <= 0 or baseline_score <= 0:
+        raise ValueError("machine_score and baseline_score must be greater than zero")
+    return duration * (machine_score / baseline_score)
+
+
+def save_benchmark_result(database_path: str, result: BenchmarkResult) -> None:
+    conn = sqlite3.connect(database_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS benchmark_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                machine_id TEXT,
+                cpu_score REAL,
+                memory_score REAL,
+                disk_score REAL,
+                io_score REAL,
+                score REAL,
+                created_at REAL
+            )
+            """
         )
-    ''')
-    for time in times:
-        cursor.execute('''
-            INSERT INTO benchmark_samples (machine_id, benchmark_name, time)
-            VALUES (?, ?, ?)
-        ''', (machine_id, benchmark_name, time))
-    conn.commit()
-    conn.close()
-
-# Example usage
-cpu_times = run_benchmark_multiple_times(lambda: cpu_benchmark_multicore(workers=os.cpu_count()), iterations=150)
-memory_times = run_benchmark_multiple_times(memory_benchmark, iterations=150)
-disk_times = run_benchmark_multiple_times(disk_benchmark, iterations=150)
-io_times = run_benchmark_multiple_times(io_benchmark, iterations=150)
-peak_disk_write_throughputs = run_peak_disk_write_benchmark(iterations=150)
-
-save_benchmark_results('machine_A', 'CPU', cpu_times)
-save_benchmark_results('machine_A', 'Memory', memory_times)
-save_benchmark_results('machine_A', 'Disk', disk_times)
-save_benchmark_results('machine_A', 'IO', io_times)
-save_benchmark_results('machine_A', 'PeakDiskWrite', peak_disk_write_throughputs)
-
-print("Benchmarking complete. Results saved to the database.")
+        cursor.execute(
+            """
+            INSERT INTO benchmark_results (
+                machine_id,
+                cpu_score,
+                memory_score,
+                disk_score,
+                io_score,
+                score,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                result.machine_id,
+                result.cpu_score,
+                result.memory_score,
+                result.disk_score,
+                result.io_score,
+                result.score,
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
