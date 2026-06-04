@@ -17,6 +17,8 @@ import pandas as pd
 from multiprocessing import Process, Event, Manager
 import sys
 from testrium.common.generator.main import resolve_template
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from testrium.tools.benchmark import run_machine_benchmark, save_benchmark_result
 
 # Initialize colorama
 init(autoreset=True)
@@ -78,6 +80,44 @@ def handle_exception(test_name: str, start_time, e: str) -> dict:
     return {"name": test_name, "passed": False, "total_time": elapsed_time}
 
 
+def _run_single_test(test_name: str, test_func, extra_condition_fn):
+    print(f"{Fore.YELLOW}Running test: {test_name}")
+    start_time = time.time()
+
+    try:
+        if test_name == "log_test_time":
+            pass
+        elif test_name == "verify_condition":
+            with suppress_output():
+                test_func(lambda: True)
+        else:
+            with suppress_output():
+                test_func()
+
+        if extra_condition_fn is not None and not extra_condition_fn(test_name):
+            return handle_exception(test_name, start_time, "Extra validation failed")
+
+        elapsed_time = time.time() - start_time
+        print(f"{Fore.GREEN}{test_name}: PASSED in {elapsed_time:.2f} seconds")
+        return {"name": test_name, "passed": True, "total_time": elapsed_time}
+
+    except Exception as e:
+        return handle_exception(test_name, start_time, e)
+
+
+def _ordered_test_groups(test_functions):
+    tests_by_priority = {}
+    for test_name, test_func in test_functions.items():
+        priority = getattr(test_func, "testrium_priority", 0)
+        parallelize = getattr(test_func, "testrium_parallelize", False)
+        tests_by_priority.setdefault(priority, []).append(
+            (test_name, test_func, parallelize)
+        )
+
+    for priority in sorted(tests_by_priority):
+        yield tests_by_priority[priority]
+
+
 def run_test(base_dir: str, dir_name: str, test_functions, extra_condition_fn):
     """
     This method load the test functions and the special functions,
@@ -116,45 +156,36 @@ def run_test(base_dir: str, dir_name: str, test_functions, extra_condition_fn):
     all_tests_passed = True
     tests_completed = []
 
-    # > Run each test found in the test group
-    for test_name, test_func in test_functions.items():
-        print(f"{Fore.YELLOW}Running test: {test_name}")
-        start_time = time.time()
+    for priority_group in _ordered_test_groups(test_functions):
+        parallel_tests = [
+            (test_name, test_func)
+            for test_name, test_func, parallelize in priority_group
+            if parallelize
+        ]
+        sequential_tests = [
+            (test_name, test_func)
+            for test_name, test_func, parallelize in priority_group
+            if not parallelize
+        ]
 
-        try:
-            if test_name == "log_test_time":
-                # with suppress_output(): 
-                #     test_func(dummy_function)  # Pass a dummy function if required
-                pass
-            elif test_name == "verify_condition":
-                # TODO >>> Use this as a condition to verify if the requirements was completed for the test case
-                with suppress_output():
-                    test_func(lambda: True)  # Pass a lambda function if required
-            else:
-                with suppress_output():
-                    test_func()
+        for test_name, test_func in sequential_tests:
+            result = _run_single_test(test_name, test_func, extra_condition_fn)
+            tests_completed.append(result)
+            all_tests_passed = all_tests_passed and result["passed"]
 
-            if extra_condition_fn != None:
-                if extra_condition_fn(test_name):
-                    pass
-                else:
-                    tests_completed.append(
-                        handle_exception(
-                            test_name, start_time, "Extra validation failed"
-                        )
-                    )
-            else:
-                pass
-
-            elapsed_time = time.time() - start_time
-            print(f"{Fore.GREEN}{test_name}: PASSED in {elapsed_time:.2f} seconds")
-            tests_completed.append(
-                {"name": test_name, "passed": True, "total_time": elapsed_time}
-            )
-
-        except Exception as e:
-            all_tests_passed = False
-            tests_completed.append(handle_exception(test_name, start_time, e))
+        if parallel_tests:
+            max_workers = min(len(parallel_tests), os.cpu_count() or 1)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _run_single_test, test_name, test_func, extra_condition_fn
+                    ): test_name
+                    for test_name, test_func in parallel_tests
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    tests_completed.append(result)
+                    all_tests_passed = all_tests_passed and result["passed"]
 
     if os.path.exists(setup_path):
         t1.kill()
@@ -214,13 +245,56 @@ def main():
     subparsers = parser.add_subparsers(dest='command', help='Sub-command help')
     run_parser = subparsers.add_parser('run', help='Run the tests')
 
+    benchmark_parser = subparsers.add_parser(
+        'benchmark',
+        help='Collect machine benchmark scores for result normalization',
+    )
+    benchmark_parser.add_argument(
+        '--database',
+        default=None,
+        help='Optional SQLite database path to store the benchmark result',
+    )
+    benchmark_parser.add_argument(
+        '--iterations',
+        type=int,
+        default=3,
+        help='Number of iterations for each benchmark sample',
+    )
+
+    gen_configs_parser = subparsers.add_parser(
+        'gen-configs',
+        help='Generate config.toml and units templates in a target directory',
+    )
+    gen_configs_parser.add_argument(
+        'gen_path',
+        nargs='?',
+        default='.',
+        help='Path for generation. Use "." for the current directory',
+    )
+
     gen_parser = subparsers.add_parser('gen', help='Generate already made templates')
     gen_parser.add_argument('type', choices=["config-template"], help='Type of the template to generate')
-    gen_parser.add_argument('gen_path', help='Optional path for the generation')
+    gen_parser.add_argument(
+        'gen_path',
+        nargs='?',
+        default='.',
+        help='Optional path for the generation',
+    )
     args = parser.parse_args()
 
     if args.command == "gen":
         resolve_template(args.type, args.gen_path)
+        return
+
+    if args.command == "gen-configs":
+        resolve_template("config-template", args.gen_path)
+        return
+
+    if args.command == "benchmark":
+        result = run_machine_benchmark(iterations=args.iterations)
+        if args.database:
+            save_benchmark_result(args.database, result)
+        print(result.to_dict())
         return
     
     base_dir = os.getcwd()
@@ -314,7 +388,7 @@ def main():
             )
 
             print(f"{Fore.BLUE} Unit {unit['name']}")
-            for event in eval(unit["events"]):
+            for event in unit["events"]:
                 if event not in unit_events:
                     print(f"   - {Fore.RED}{event} was not completed!")
                     events_missing.append(event)

@@ -1,2 +1,2 @@
 [Configs]
-units = []
+units = ["_host", "client"]
