@@ -1,6 +1,9 @@
 name: Publish Python Package
 
 on:
+  push:
+    branches:
+      - master
   release:
     types:
       - published
@@ -42,7 +45,38 @@ jobs:
       - name: Build package
         run: poetry build
 
+      - name: Check published version
+        id: pypi_version
+        env:
+          PACKAGE_NAME: testrium
+        run: |
+          PACKAGE_VERSION="$(poetry version -s)"
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          PACKAGE_VERSION="$PACKAGE_VERSION" python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          package_name = os.environ["PACKAGE_NAME"]
+          package_version = os.environ["PACKAGE_VERSION"]
+          url = f"https://pypi.org/pypi/{package_name}/json"
+
+          try:
+              with urllib.request.urlopen(url, timeout=20) as response:
+                  package_data = json.load(response)
+              exists = package_version in package_data.get("releases", {})
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  exists = False
+              else:
+                  raise
+
+          print(f"exists={'true' if exists else 'false'}")
+          PY
+
       - name: Check PyPI token
+        if: steps.pypi_version.outputs.exists != 'true'
         env:
           POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_API_TOKEN }}
         run: |
@@ -52,6 +86,11 @@ jobs:
           fi
 
       - name: Publish package
+        if: steps.pypi_version.outputs.exists != 'true'
         env:
           POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_API_TOKEN }}
         run: poetry publish --no-interaction --username __token__ --password "$POETRY_PYPI_TOKEN_PYPI"
+
+      - name: Skip existing version
+        if: steps.pypi_version.outputs.exists == 'true'
+        run: echo "testrium ${{ steps.pypi_version.outputs.version }} already exists on PyPI; skipping publish."
