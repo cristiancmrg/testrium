@@ -269,3 +269,17 @@ Testrium's core promise is simple:
 ```text
 test the whole circuit, not only one component inside it
 ```
+
+## License
+
+Beginning with version 0.3.0, portions of Testrium owned by Cristian Camargo
+Filho, trading as Zarpyon, are available under the
+[PolyForm Small Business License 1.0.0](LICENSE-POLYFORM.md). Separate
+commercial terms are available for uses outside that license.
+
+Testrium releases through version 0.2.0 remain available under the MIT
+License. Existing contributor-owned portions that were received under MIT
+also remain under that license.
+
+See [NOTICE.md](NOTICE.md) for exact scope and [AUTHORS.md](AUTHORS.md)
+for project participants.
