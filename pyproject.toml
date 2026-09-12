@@ -1,12 +1,13 @@
 [tool.poetry]
 name = "testrium"
-version = "0.2.0"
+version = "0.3.0"
 description = "A modern, advanced testing framework."
-authors = ["Cristian Camargo <ccf@cdone.com.br>"]
+authors = ["Cristian Camargo Filho <ccf@cdone.com.br>"]
 readme = "README.md"
 homepage = "https://github.com/letalboy/testrium"
 repository = "https://github.com/letalboy/testrium"
-license = "MIT"
+license = "Proprietary"
+classifiers = ["License :: Other/Proprietary License"]
 
 [tool.poetry.dependencies]
 python = "^3.10"
